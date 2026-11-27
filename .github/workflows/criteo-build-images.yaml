@@ -1,0 +1,117 @@
+name: Criteo Build Images
+
+# Minimal downstream build of the Cilium images, pushed to the GitHub Container
+# Registry of this fork (ghcr.io/<owner>/<repo>/<image>), so that the internal
+# external-images mirroring (criteo-images/external-images.yml) can pull them.
+# The upstream build-images-*.yaml workflows are tied to Cilium's Quay/Docker
+# Hub OIDC identity and are not usable on this fork.
+#
+# - PRs only build (no push).
+# - Pushes to criteo/** branches publish <image>:<sha> and <image>:<branch>.
+# - Tags vX.Y.Z-criteo.N publish <image>:vX.Y.Z-criteo.N (what gets mirrored).
+
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - 'criteo/**'
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+-criteo.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ vars.CRITEO_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cilium
+            dockerfile: ./images/cilium/Dockerfile
+          - name: operator-generic
+            dockerfile: ./images/operator/Dockerfile
+          - name: hubble-relay
+            dockerfile: ./images/hubble-relay/Dockerfile
+          - name: clustermesh-apiserver
+            dockerfile: ./images/clustermesh-apiserver/Dockerfile
+    env:
+      REGISTRY: ghcr.io
+      PUSH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free up disk space
+        uses: ./.github/actions/disk-cleanup
+
+      # Runtime base image (clang, bpftool, iproute2...) pinned in the repo,
+      # pulled from the public quay.io/cilium registry. Mirror it if runners
+      # cannot reach quay.io.
+      - name: Set runtime image
+        uses: ./.github/actions/set-runtime-image
+        with:
+          repository: quay.io/cilium/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to ghcr.io
+        if: ${{ env.PUSH == 'true' }}
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          sha="${GITHUB_SHA}"
+          ref="${GITHUB_REF_NAME//\//-}"
+          if [[ "${PUSH}" == "true" ]]; then
+            base="${REGISTRY}/${GITHUB_REPOSITORY,,}/${{ matrix.name }}"
+            tags="${base}:${sha},${base}:${ref}"
+          else
+            tags="criteo-local/${{ matrix.name }}:${sha}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "parent=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      # The Go build embeds the version from git; give it a local tag so
+      # untagged builds report a sane version.
+      - name: Tag local module version
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          REV="$(git show -s --date=format:'%Y%m%d%H%M%S' --format='%cd-%h')"
+          git tag -m "v${{ steps.tags.outputs.parent }}+${REV}" --no-sign "v${{ steps.tags.outputs.parent }}+${REV}" HEAD
+
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          provenance: false
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ env.PUSH == 'true' }}
+          platforms: linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
+          target: release
+          build-args: |
+            CILIUM_RUNTIME_IMAGE=${{ env.CILIUM_RUNTIME_IMAGE }}
+            OPERATOR_VARIANT=${{ matrix.name }}
