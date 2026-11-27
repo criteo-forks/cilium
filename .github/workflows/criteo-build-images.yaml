@@ -69,11 +69,11 @@ jobs:
           repository: quay.io/cilium/
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Login to ghcr.io
         if: ${{ env.PUSH == 'true' }}
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -102,16 +102,22 @@ jobs:
           REV="$(git show -s --date=format:'%Y%m%d%H%M%S' --format='%cd-%h')"
           git tag -m "v${{ steps.tags.outputs.parent }}+${REV}" --no-sign "v${{ steps.tags.outputs.parent }}+${REV}" HEAD
 
+      # docker/build-push-action is not in the org allowlist: call buildx directly.
       - name: Build ${{ matrix.name }}
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          provenance: false
-          context: .
-          file: ${{ matrix.dockerfile }}
-          push: ${{ env.PUSH == 'true' }}
-          platforms: linux/amd64
-          tags: ${{ steps.tags.outputs.tags }}
-          target: release
-          build-args: |
-            CILIUM_RUNTIME_IMAGE=${{ env.CILIUM_RUNTIME_IMAGE }}
-            OPERATOR_VARIANT=${{ matrix.name }}
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+          OPERATOR_VARIANT: ${{ matrix.name }}
+        run: |
+          tag_args=()
+          IFS=',' read -ra tag_list <<< "${TAGS}"
+          for t in "${tag_list[@]}"; do tag_args+=(--tag "$t"); done
+          if [[ "${PUSH}" == "true" ]]; then out=(--push); else out=(--output type=cacheonly); fi
+          docker buildx build \
+            --provenance=false \
+            --platform linux/amd64 \
+            --file "${DOCKERFILE}" \
+            --target release \
+            --build-arg "CILIUM_RUNTIME_IMAGE=${CILIUM_RUNTIME_IMAGE}" \
+            --build-arg "OPERATOR_VARIANT=${OPERATOR_VARIANT}" \
+            "${tag_args[@]}" "${out[@]}" .
