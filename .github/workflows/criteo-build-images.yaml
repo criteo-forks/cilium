@@ -109,6 +109,8 @@ jobs:
           TAGS: ${{ steps.tags.outputs.tags }}
           OPERATOR_VARIANT: ${{ matrix.name }}
         run: |
+          # set-runtime-image leaves a trailing space (newline translated); trim it.
+          CILIUM_RUNTIME_IMAGE="$(echo "${CILIUM_RUNTIME_IMAGE}" | xargs)"
           tag_args=()
           IFS=',' read -ra tag_list <<< "${TAGS}"
           for t in "${tag_list[@]}"; do tag_args+=(--tag "$t"); done
